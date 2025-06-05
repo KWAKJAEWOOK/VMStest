@@ -1,6 +1,7 @@
 // VMSconnection_manager.c
 
 #include "VMSconnection_manager.h"
+#include "minIni.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,17 +19,6 @@
 
 #define MAX_INI_LINE_LENGTH 256
 #define CONNECTION_RETRY_DELAY_MS 500 // 0.5s
-
-// Helper function to trim leading/trailing whitespace
-static char* trim_whitespace(char* str) {
-    char *end;
-    while (isspace((unsigned char)*str)) str++;
-    if (*str == 0) return str;
-    end = str + strlen(str) - 1;
-    while (end > str && isspace((unsigned char)*end)) end--;
-    *(end + 1) = 0;
-    return str;
-}
 
 // Helper function to convert IP string to uint32_t (network byte order)
 static int ip_str_to_uint32(const char* ip_str, uint32_t* out_ip_int) {
@@ -111,124 +101,74 @@ VMSServers* vms_manager_init(const char* ini_filepath) {
         return NULL;
     }
 
-    // 뮤텍스 초기화
     if (pthread_mutex_init(&vms_data->mutex, NULL) != 0) {
         perror("Failed to initialize mutex for VMSServers");
         free(vms_data);
         return NULL;
     }
 
-    FILE* ini_file = fopen(ini_filepath, "r");
-    if (!ini_file) {
-        perror("Failed to open INI file");
-        pthread_mutex_destroy(&vms_data->mutex); // 뮤텍스 생성 후 실패 시 파괴
-        free(vms_data);
-        return NULL;
-    }
+    char section_name_buffer[MAX_INI_LINE_LENGTH];
+    int section_idx = 0;
 
-    char line[MAX_INI_LINE_LENGTH];
-    int current_group_id = -1;
-    VMSServerGroup* current_group_ptr = NULL;
-    char start_ip_str[16] = {0};
-    char end_ip_str[16] = {0};
-    int port = 0;
+    printf("[VMSManager] Loading server config from: %s\n", ini_filepath);
 
-    while (fgets(line, sizeof(line), ini_file)) {
-        char* trimmed_line = trim_whitespace(line);
-        if (trimmed_line[0] == ';' || trimmed_line[0] == '#' || trimmed_line[0] == '\0') {
+    while (ini_getsection(section_idx++, section_name_buffer, sizeof(section_name_buffer), ini_filepath) > 0) {
+        int current_group_id = -1;
+        // 섹션 이름에서 그룹 ID 파싱 (예: "1번 그룹" -> 1)
+        if (sscanf(section_name_buffer, "%d번 그룹", &current_group_id) == 1 ||
+            sscanf(section_name_buffer, "%d", &current_group_id) == 1) { // 또는 단순히 숫자 섹션 이름 "[1]"
+            // 유효한 그룹 ID 파싱 성공
+        } else {
+            fprintf(stderr, "[VMSManager] Warning: Could not parse group ID from section name: %s\n", section_name_buffer);
+            continue; // 다음 섹션으로
+        }
+
+        char start_ip_str[16] = {0};
+        char end_ip_str[16] = {0};
+        char port_str[10] = {0}; // 포트번호도 문자열로 읽은 후 변환
+        int port = 0;
+
+        // 현재 섹션(current_group_id에 해당하는)에서 키 값들 읽기
+        ini_gets(section_name_buffer, "시작 IP", "", start_ip_str, sizeof(start_ip_str), ini_filepath);
+        ini_gets(section_name_buffer, "끝 IP", "", end_ip_str, sizeof(end_ip_str), ini_filepath);
+        ini_gets(section_name_buffer, "PORT", "0", port_str, sizeof(port_str), ini_filepath);
+        port = atoi(port_str);
+
+        if (start_ip_str[0] == '\0' || end_ip_str[0] == '\0' || port == 0) {
+            fprintf(stderr, "[VMSManager] Error: Missing Start IP, End IP, or Port in section [%s]\n", section_name_buffer);
             continue;
         }
 
-        if (trimmed_line[0] == '[' && trimmed_line[strlen(trimmed_line) - 1] == ']') {
-            if (current_group_ptr && start_ip_str[0] != 0 && end_ip_str[0] != 0 && port != 0) {
-                uint32_t start_ip_int, end_ip_int;
-                if (ip_str_to_uint32(start_ip_str, &start_ip_int) == 0 &&
-                    ip_str_to_uint32(end_ip_str, &end_ip_int) == 0) {
-                    start_ip_int = ntohl(start_ip_int);
-                    end_ip_int = ntohl(end_ip_int);
-                    if (end_ip_int < start_ip_int) {
-                        fprintf(stderr, "Error in Group %d: End IP is less than Start IP.\n", current_group_id);
-                    } else {
-                        current_group_ptr->num_servers = (end_ip_int - start_ip_int) + 1;
-                        current_group_ptr->servers = (VMSServerInfo*)calloc(current_group_ptr->num_servers, sizeof(VMSServerInfo));
-                        if (!current_group_ptr->servers) {
-                            perror("Failed to allocate VMSServerInfo array");
-                            fclose(ini_file);
-                            // 부분적으로 할당된 vms_data를 정리하기 위해 cleanup 호출 고려
-                            // 하지만 cleanup은 mutex destroy도 하므로, init 실패 시에는 직접 free
-                            if(vms_data->groups) free(vms_data->groups);
-                            pthread_mutex_destroy(&vms_data->mutex);
-                            free(vms_data);
-                            return NULL;
-                        }
-                        for (int i_s = 0; i_s < current_group_ptr->num_servers; ++i_s) {
-                            uint32_t current_ip_host_order = start_ip_int + i_s;
-                            uint32_to_ip_str(htonl(current_ip_host_order), current_group_ptr->servers[i_s].ip_address, sizeof(current_group_ptr->servers[i_s].ip_address));
-                            current_group_ptr->servers[i_s].port = port;
-                            current_group_ptr->servers[i_s].socket_handle = -1;
-                            current_group_ptr->servers[i_s].group_id_for_log = current_group_id;
-                            vms_data->total_servers_configured++;
-                        }
-                    }
-                } else {
-                     fprintf(stderr, "Error parsing IPs for Group %d: StartIP='%s', EndIP='%s'\n", current_group_id, start_ip_str, end_ip_str);
-                }
-                start_ip_str[0] = '\0'; end_ip_str[0] = '\0'; port = 0;
-            }
-            int id_val = 0;
-            char* p = trimmed_line + 1;
-            while(isdigit(*p)) {
-                id_val = id_val * 10 + (*p - '0');
-                p++;
-            }
-            current_group_id = id_val;
-            vms_data->num_groups++;
-            VMSServerGroup* new_groups_ptr = (VMSServerGroup*)realloc(vms_data->groups, vms_data->num_groups * sizeof(VMSServerGroup));
-            if (!new_groups_ptr) {
-                perror("Failed to realloc groups array");
-                fclose(ini_file);
-                vms_manager_cleanup(vms_data); // cleanup은 mutex_destroy 포함
-                return NULL;
-            }
-            vms_data->groups = new_groups_ptr;
-            current_group_ptr = &vms_data->groups[vms_data->num_groups - 1];
-            memset(current_group_ptr, 0, sizeof(VMSServerGroup));
-            current_group_ptr->group_id = current_group_id;
-        } else if (current_group_ptr) {
-            char* key = trimmed_line;
-            char* value = strchr(trimmed_line, '=');
-            if (!value) value = strchr(trimmed_line, ':');
-            if (value) {
-                *value = '\0';
-                value++;
-                key = trim_whitespace(key);
-                value = trim_whitespace(value);
-                if (strcmp(key, "시작 IP") == 0) {
-                    strncpy(start_ip_str, value, sizeof(start_ip_str) - 1);
-                } else if (strcmp(key, "끝 IP") == 0) {
-                    strncpy(end_ip_str, value, sizeof(end_ip_str) - 1);
-                } else if (strcmp(key, "PORT") == 0) {
-                    port = atoi(value);
-                }
-            }
+        // 그룹 정보 추가 로직 (realloc 등)
+        vms_data->num_groups++;
+        VMSServerGroup* new_groups_ptr = (VMSServerGroup*)realloc(vms_data->groups, vms_data->num_groups * sizeof(VMSServerGroup));
+        if (!new_groups_ptr) {
+            perror("[VMSManager] Failed to realloc groups array");
+            vms_manager_cleanup(vms_data);
+            return NULL;
         }
-    }
-    fclose(ini_file);
+        vms_data->groups = new_groups_ptr;
+        VMSServerGroup* current_group_ptr = &vms_data->groups[vms_data->num_groups - 1];
+        memset(current_group_ptr, 0, sizeof(VMSServerGroup));
+        current_group_ptr->group_id = current_group_id;
 
-    if (current_group_ptr && start_ip_str[0] != 0 && end_ip_str[0] != 0 && port != 0) {
+        // IP 범위 처리 및 서버 정보 채우기
         uint32_t start_ip_int, end_ip_int;
         if (ip_str_to_uint32(start_ip_str, &start_ip_int) == 0 &&
             ip_str_to_uint32(end_ip_str, &end_ip_int) == 0) {
+            
             start_ip_int = ntohl(start_ip_int);
             end_ip_int = ntohl(end_ip_int);
+
             if (end_ip_int < start_ip_int) {
-                fprintf(stderr, "Error in Group %d: End IP is less than Start IP.\n", current_group_id);
+                fprintf(stderr, "[VMSManager] Error in Group %d: End IP is less than Start IP.\n", current_group_id);
             } else {
                 current_group_ptr->num_servers = (end_ip_int - start_ip_int) + 1;
                 current_group_ptr->servers = (VMSServerInfo*)calloc(current_group_ptr->num_servers, sizeof(VMSServerInfo));
-                 if (!current_group_ptr->servers) {
-                    perror("Failed to allocate VMSServerInfo array for last group");
-                    vms_manager_cleanup(vms_data); return NULL;
+                if (!current_group_ptr->servers) {
+                    perror("[VMSManager] Failed to allocate VMSServerInfo array");
+                    vms_manager_cleanup(vms_data);
+                    return NULL;
                 }
                 for (int i_s = 0; i_s < current_group_ptr->num_servers; ++i_s) {
                     uint32_t current_ip_host_order = start_ip_int + i_s;
@@ -236,17 +176,27 @@ VMSServers* vms_manager_init(const char* ini_filepath) {
                     current_group_ptr->servers[i_s].port = port;
                     current_group_ptr->servers[i_s].socket_handle = -1;
                     current_group_ptr->servers[i_s].group_id_for_log = current_group_id;
+                    // init 시에는 VMSServerInfo의 state 등 다른 필드도 초기화 필요
+                    // current_group_ptr->servers[i_s].state = VMS_STATE_DISCONNECTED; // 만약 state 필드가 있다면
+                    // current_group_ptr->servers[i_s].last_attempt_time = 0;
                     vms_data->total_servers_configured++;
                 }
+                printf("[VMSManager] Group %d (%s) configured with %d servers (IPs: %s-%s, Port: %d)\n",
+                       current_group_id, section_name_buffer, current_group_ptr->num_servers, start_ip_str, end_ip_str, port);
             }
         } else {
-            fprintf(stderr, "Error parsing IPs for last Group %d: StartIP='%s', EndIP='%s'\n", current_group_id, start_ip_str, end_ip_str);
+            fprintf(stderr, "[VMSManager] Error parsing IPs for Group %d: StartIP='%s', EndIP='%s'\n",
+                    current_group_id, start_ip_str, end_ip_str);
         }
+    } // end while (ini_getsection)
+
+    if (vms_data->num_groups == 0) {
+        fprintf(stderr, "[VMSManager] No server groups found in %s.\n", ini_filepath);
+        // 설정된 서버가 없는 것이 오류가 아니라면 이 부분은 경고로 처리하거나,
+        // vms_manager_cleanup 후 NULL 반환 대신 비어있는 vms_data를 반환할 수도 있습니다.
+        // 현재는 num_groups가 0이어도 vms_data를 반환합니다.
     }
     
-    if (vms_data->num_groups == 0 && vms_data->total_servers_configured == 0) {
-        fprintf(stderr, "No server groups or servers configured from INI file.\n");
-    }
     return vms_data;
 }
 
@@ -366,6 +316,10 @@ void vms_manager_cleanup(VMSServers* vms_servers) {
     if (!vms_servers) return;
 
     printf("Cleaning up VMS connection manager...\n");
+    
+    // 뮤텍스 잠금은 이 시점에서 다른 스레드가 공유 데이터에 접근하지 않는다고 가정하면
+    // 필수는 아니지만, destroy 전에는 어떤 스레드도 사용 중이 아니어야 함.
+    // 이미 conn_manager_thread_func 스레드가 종료된 후 호출될 것이므로 안전.
 
     for (int i = 0; i < vms_servers->num_groups; ++i) {
         VMSServerGroup* group = &vms_servers->groups[i];
