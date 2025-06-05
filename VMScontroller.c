@@ -2,102 +2,40 @@
 
 #include "VMScontroller.h"
 #include "VMSprotocol.h"
+#include "minIni.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <ctype.h>
 
-#define CONFIG_LINE_MAX_LEN 256 // INI 파일 한 줄 최대 길이
-
-// config.ini 파싱 시 키-값 쌍을 처리하는 내부 헬퍼 함수
-static void parse_config_line(const char* key, const char* value, VMS_TextParamConfig_t* config) {
-    if (strcmp(key, "RST") == 0) strncpy(config->rst, value, sizeof(config->rst) - 1);
-    else if (strcmp(key, "SPD") == 0) strncpy(config->spd, value, sizeof(config->spd) - 1);
-    else if (strcmp(key, "NEN") == 0) strncpy(config->nen, value, sizeof(config->nen) - 1);
-    else if (strcmp(key, "LNE") == 0) strncpy(config->lne, value, sizeof(config->lne) - 1);
-    else if (strcmp(key, "YSZ") == 0) strncpy(config->ysz, value, sizeof(config->ysz) - 1);
-    else if (strcmp(key, "EFF") == 0) strncpy(config->eff, value, sizeof(config->eff) - 1);
-    else if (strcmp(key, "DLY") == 0) strncpy(config->dly, value, sizeof(config->dly) - 1);
-    else if (strcmp(key, "FIX") == 0) strncpy(config->fix, value, sizeof(config->fix) - 1);
-    else if (strcmp(key, "DEFALT_FONT") == 0) strncpy(config->default_font, value, sizeof(config->default_font) - 1);
-    else if (strcmp(key, "DEFAULT_COLOR") == 0) strncpy(config->default_color, value, sizeof(config->default_color) - 1);
-    // strncpy 후에는 항상 널 종료 보장
-    config->rst[sizeof(config->rst)-1] = '\0';
-    config->spd[sizeof(config->spd)-1] = '\0';
-    config->nen[sizeof(config->nen)-1] = '\0';
-    config->ysz[sizeof(config->ysz)-1] = '\0';
-    config->eff[sizeof(config->eff)-1] = '\0';
-    config->dly[sizeof(config->dly)-1] = '\0';
-    config->fix[sizeof(config->fix)-1] = '\0';
-    config->default_font[sizeof(config->default_font)-1] = '\0';
-    config->default_color[sizeof(config->default_color)-1] = '\0';
-}
-
-// 외부에서 호출할 config 로드 함수
 bool vms_controller_load_config(const char* config_filepath, VMS_TextParamConfig_t* out_config) {
     if (!config_filepath || !out_config) return false;
 
-    FILE* file = fopen(config_filepath, "r");
-    if (!file) {
-        perror("VMScontroller: Failed to open config.ini");
-        fprintf(stderr, "Config file path attempted: %s\n", config_filepath);
-        return false;
-    }
+    // 구조체 멤버를 기본값 또는 빈 문자열로 초기화 (선택적)
+    memset(out_config, 0, sizeof(VMS_TextParamConfig_t));
 
-    memset(out_config, 0, sizeof(VMS_TextParamConfig_t)); // 구조체 초기화
+    const char* section = "텍스트 프로토콜 파라미터"; // INI 파일의 섹션 이름
 
-    char line[CONFIG_LINE_MAX_LEN];
-    bool in_text_protocol_section = false;
+    // minIni 함수를 사용하여 각 파라미터 읽기
+    // ini_gets(section, key, default_value, buffer, buffer_size, filename)
+    ini_gets(section, "RST", "1", out_config->rst, sizeof(out_config->rst), config_filepath);
+    ini_gets(section, "SPD", "3", out_config->spd, sizeof(out_config->spd), config_filepath);
+    ini_gets(section, "NEN", "0", out_config->nen, sizeof(out_config->nen), config_filepath);
+    ini_gets(section, "LNE", "1", out_config->lne, sizeof(out_config->lne), config_filepath);
+    ini_gets(section, "YSZ", "2", out_config->ysz, sizeof(out_config->ysz), config_filepath);
+    ini_gets(section, "EFF", "090009000900", out_config->eff, sizeof(out_config->eff), config_filepath);
+    ini_gets(section, "DLY", "3", out_config->dly, sizeof(out_config->dly), config_filepath);
+    ini_gets(section, "FIX", "1", out_config->fix, sizeof(out_config->fix), config_filepath);
+    ini_gets(section, "DEFALT_FONT", "$f02", out_config->default_font, sizeof(out_config->default_font), config_filepath);
+    ini_gets(section, "DEFAULT_COLOR", "$c00", out_config->default_color, sizeof(out_config->default_color), config_filepath);
 
-    while (fgets(line, sizeof(line), file)) {
-        char* trimmed_line = line;
-        char *start = line;
-        while (isspace((unsigned char)*start)) start++;
-        char *end = line + strlen(line) - 1;
-        while (end > start && isspace((unsigned char)*end)) end--;
-        *(end + 1) = '\0';
-        trimmed_line = start;
+    // (디버깅용) 로드된 값 확인
+    // printf("[VMSController] Config loaded from '%s':\n", config_filepath);
+    // printf("  RST=%s, SPD=%s, EFF=%s, FONT=%s, COLOR=%s\n",
+    //        out_config->rst, out_config->spd, out_config->eff, out_config->default_font, out_config->default_color);
 
-        if (trimmed_line[0] == '#' || trimmed_line[0] == ';' || trimmed_line[0] == '\0') {
-            continue; // 주석 또는 빈 줄 건너뛰기
-        }
-
-        if (strcmp(trimmed_line, "[텍스트 프로토콜 파라미터]") == 0) {
-            in_text_protocol_section = true;
-            continue;
-        } else if (trimmed_line[0] == '[') { // 다른 섹션 시작
-            in_text_protocol_section = false;
-            continue;
-        }
-
-        if (in_text_protocol_section) {
-            char* key = trimmed_line;
-            char* separator = strchr(trimmed_line, '=');
-            if (separator) {
-                *separator = '\0'; // 키와 값 분리
-                char* value = separator + 1;
-                
-                // 간단한 trim 추가
-                char* trimmed_key = key; // 실제로는 trim_whitespace(key) 사용 권장
-                while(isspace((unsigned char)*trimmed_key)) trimmed_key++;
-                char* key_end = trimmed_key + strlen(trimmed_key) - 1;
-                while(key_end > trimmed_key && isspace((unsigned char)*key_end)) key_end--;
-                *(key_end+1) = '\0';
-
-                char* trimmed_value = value; // 실제로는 trim_whitespace(value) 사용 권장
-                while(isspace((unsigned char)*trimmed_value)) trimmed_value++;
-                char* value_end = trimmed_value + strlen(trimmed_value) - 1;
-                while(value_end > trimmed_value && isspace((unsigned char)*value_end)) value_end--;
-                *(value_end+1) = '\0';
-
-                parse_config_line(trimmed_key, trimmed_value, out_config);
-            }
-        }
-    }
-    fclose(file);
-    // 디버깅용 값 확인
-    // printf("Config loaded: RST=%s, SPD=%s, FONT=%s, COLOR=%s\n",
-    //        out_config->rst, out_config->spd, out_config->default_font, out_config->default_color);
+    // ini_gets는 파일이 없거나 섹션/키가 없으면 기본값을 사용하거나 0을 반환(읽은 문자열 길이).
+    // 여기서는 파일 존재 여부는 fopen 등으로 미리 확인했거나, minIni가 DefValue를 사용하므로 추가적인 오류 처리는 생략.
+    // 필요하다면 ini_gets의 반환값(읽은 문자열 길이)을 확인하여 키 존재 여부 판단 가능.
     return true;
 }
 
