@@ -316,10 +316,6 @@ void vms_manager_cleanup(VMSServers* vms_servers) {
     if (!vms_servers) return;
 
     printf("Cleaning up VMS connection manager...\n");
-    
-    // 뮤텍스 잠금은 이 시점에서 다른 스레드가 공유 데이터에 접근하지 않는다고 가정하면
-    // 필수는 아니지만, destroy 전에는 어떤 스레드도 사용 중이 아니어야 함.
-    // 이미 conn_manager_thread_func 스레드가 종료된 후 호출될 것이므로 안전.
 
     for (int i = 0; i < vms_servers->num_groups; ++i) {
         VMSServerGroup* group = &vms_servers->groups[i];
