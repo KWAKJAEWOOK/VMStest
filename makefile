@@ -1,6 +1,6 @@
 # makefile to build generated files
 
-include ../../platform.mk
+include platform.mk
 
 # include directories
 OSROOTDIR = ..$(PS)..$(PS)..
