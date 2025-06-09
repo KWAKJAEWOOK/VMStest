@@ -1,7 +1,5 @@
 // VMScontroller.c
 
-#define _GNU_SOURCE
-
 #include "VMScontroller.h"
 #include "VMSprotocol.h"
 #include "minIni.h"
@@ -18,6 +16,7 @@ static double get_closest_target_bearing(
     double lat_c, double lon_c,
     double lat_p, double lon_p
 );
+static int Change_CVIBDirCode(int cvibDirCode);
 
 bool vms_controller_load_config(const char* config_filepath, VMS_TextParamConfig_t* out_config) {
     if (!config_filepath || !out_config) return false;
@@ -151,7 +150,7 @@ VMS_MessageList_t* vms_controller_determine_messages(
             double lon_c = text_config->center_longitude;
 
             int group_for_first_wp = (int)get_closest_target_bearing(targets, 4, lat_c, lon_c, first_wp->lat, first_wp->lon);
-            if (first_cvib_degree != group_for_first_wp) { printf("방향코드불일치.\n방향코드 방위각:%f\nGPS 방위각:%f\n",first_cvib_degree,group_for_first_wp); }
+            if (first_cvib_degree != group_for_first_wp) { printf("방향코드불일치.\n방향코드 방위각:%d\nGPS 방위각:%d\n",first_cvib_degree,group_for_first_wp); }
             int first_wp_group_id = group_for_first_wp; // config.ini 파일을 통해 first_cvib_degree로 실행하도록 변경 가능하도록 할 예정
 
             snprintf(payload_buffer, sizeof(payload_buffer),
@@ -299,7 +298,7 @@ int Change_CVIBDirCode(int cvib_code_id) {
             return 270;
         case 80:
             return 315;
-        defalt:
-            return NULL;
+        default:
+            return -1;
     }
 }
