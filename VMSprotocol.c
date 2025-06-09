@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <iconv.h>
 
 // Little-endian으로 uint16_t 값을 버퍼에 쓰는 헬퍼 함수
 static void pack_uint16_le(uint8_t* buf, uint16_t val) {
@@ -22,6 +23,48 @@ static void pack_uint32_le(uint8_t* buf, uint32_t val) {
     buf[1] = (uint8_t)((val >> 8) & 0xFF);
     buf[2] = (uint8_t)((val >> 16) & 0xFF);
     buf[3] = (uint8_t)((val >> 24) & 0xFF);
+}
+
+/**
+ * @brief UTF-8 문자열을 UTF-16 Little Endian 바이트 스트림으로 변환
+ * @param utf8_str 변환할 UTF-8 문자열.
+ * @param out_utf16_buf 변환된 UTF-16LE 데이터가 저장될 버퍼의 포인터. 함수 내에서 동적 할당
+ * @param out_len_bytes 변환된 데이터의 바이트 단위 길이가 저장될 포인터.
+ * @return 성공 시 0, 실패 시 -1.
+ */
+static int convert_utf8_to_utf16le(const char* utf8_str, uint8_t** out_utf16_buf, size_t* out_len_bytes) {
+    iconv_t cd = iconv_open("UTF-16LE", "UTF-8");
+    if (cd == (iconv_t)-1) {
+        perror("iconv_open failed");
+        return -1;
+    }
+
+    size_t in_bytes_left = strlen(utf8_str);
+    char* in_buf_ptr = (char*)utf8_str;
+
+    // 변환 결과는 최대 (입력길이 * 2) 정도 될 수 있음. 여유롭게 할당.
+    size_t out_buf_size = (in_bytes_left + 1) * 2;
+    uint8_t* out_buf_start = (uint8_t*)malloc(out_buf_size);
+    if (!out_buf_start) {
+        perror("malloc for utf16 buffer failed");
+        iconv_close(cd);
+        return -1;
+    }
+    char* out_buf_ptr = (char*)out_buf_start;
+    size_t out_bytes_left = out_buf_size;
+
+    size_t result = iconv(cd, &in_buf_ptr, &in_bytes_left, &out_buf_ptr, &out_bytes_left);
+    iconv_close(cd);
+
+    if (result == (size_t)-1) {
+        perror("iconv conversion failed");
+        free(out_buf_start);
+        return -1;
+    }
+
+    *out_utf16_buf = out_buf_start;
+    *out_len_bytes = out_buf_size - out_bytes_left;
+    return 0;
 }
 
 // M30 전광판 제어 프로토콜용 체크섬 계산 [cite: 14]
@@ -46,21 +89,16 @@ static uint8_t calculate_image_checksum(const uint8_t* buffer_cmd_to_data, uint3
     return checksum;
 }
 
-
 uint8_t* create_text_control_packet(uint8_t command_type, const char* data_str, uint16_t* out_packet_len) {
-    size_t data_str_len = strlen(data_str);
-    uint16_t actual_data_field_len = data_str_len * 2;
-    uint8_t* data_field_bytes = (uint8_t*)malloc(actual_data_field_len);
-    if (!data_field_bytes) {
-        perror("Failed to allocate memory for data_field_bytes");
+    // 1. DATA 필드 실제 바이트 스트림 생성 (UTF-8 -> UTF-16LE 변환)
+    uint8_t* data_field_bytes = NULL;
+    size_t actual_data_field_len = 0;
+    if (convert_utf8_to_utf16le(data_str, &data_field_bytes, &actual_data_field_len) != 0) {
+        fprintf(stderr, "Failed to convert data string to UTF-16LE.\n");
         return NULL;
     }
-    for (size_t i = 0; i < data_str_len; ++i) {
-        data_field_bytes[i * 2] = (uint8_t)data_str[i]; // 하위 바이트
-        data_field_bytes[i * 2 + 1] = 0x00;            // 상위 바이트
-    }
 
-    // 2. 전체 패킷 길이 계산: STX(1) + TYPE(1) + LENGTH(2) + DATA(actual_data_field_len) + CHECKSUM(1) + ETX(1)
+    // 2. 전체 패킷 길이 계산
     uint16_t total_packet_len = 1 + 1 + 2 + actual_data_field_len + 1 + 1;
     uint8_t* packet = (uint8_t*)malloc(total_packet_len);
     if (!packet) {
@@ -71,20 +109,20 @@ uint8_t* create_text_control_packet(uint8_t command_type, const char* data_str, 
 
     // 3. 패킷 필드 채우기
     uint16_t current_idx = 0;
-    packet[current_idx++] = TEXT_CONTROL_STX;         // STX
-    packet[current_idx++] = command_type;             // TYPE
-    pack_uint16_le(&packet[current_idx], actual_data_field_len); // LENGTH (Data 길이) [cite: 13, 15]
+    packet[current_idx++] = TEXT_CONTROL_STX;
+    packet[current_idx++] = command_type;
+    pack_uint16_le(&packet[current_idx], (uint16_t)actual_data_field_len); // LENGTH
     current_idx += 2;
     memcpy(&packet[current_idx], data_field_bytes, actual_data_field_len); // DATA
     current_idx += actual_data_field_len;
 
-    // 4. 체크섬 계산 (STX부터 DATA까지)
+    // 4. 체크섬 계산
     uint16_t len_for_checksum = 1 + 1 + 2 + actual_data_field_len;
-    packet[current_idx++] = calculate_text_control_checksum(packet, len_for_checksum); // CHECKSUM
+    packet[current_idx++] = calculate_text_control_checksum(packet, len_for_checksum);
 
-    packet[current_idx++] = TEXT_CONTROL_ETX;         // ETX
+    packet[current_idx++] = TEXT_CONTROL_ETX;
 
-    free(data_field_bytes);
+    free(data_field_bytes); // 변환에 사용된 버퍼 해제
     *out_packet_len = total_packet_len;
     return packet;
 }
