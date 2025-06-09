@@ -19,6 +19,8 @@ typedef struct {
     char fix[8];
     char default_font[10];
     char default_color[10];
+    double center_latitude;
+    double center_longitude;
 } VMS_TextParamConfig_t;
 
 // 전송할 페이로드와 대상 그룹 ID 목록을 담을 구조체
