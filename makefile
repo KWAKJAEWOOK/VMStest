@@ -3,7 +3,7 @@
 include platform.mk
 
 # include directories
-OSROOTDIR = ~/asn1c-v790
+OSROOTDIR = $(HOME)/asn1c-v790
 LIBDIR  = $(OSROOTDIR)$(PS)c$(RTDIRSFX)$(PS)lib
 PRJLIBDIR = .$(PS)lib
 PRJBINDIR = .$(PS)bin
